@@ -1,0 +1,9 @@
+../Core/LCD.c:32:6:LcdStrobe	1
+../Core/LCD.c:40:6:LcdWriteCmd	1
+../Core/LCD.c:55:6:LcdWriteData	1
+../Core/LCD.c:70:6:LcdClear	1
+../Core/LCD.c:76:6:LcdPutS	2
+../Core/LCD.c:82:6:LcdPutCh	1
+../Core/LCD.c:99:6:LcdGoto	3
+../Core/LCD.c:111:6:LcdInit	1
+../Core/LCD.c:146:6:LcdPortPinConvert	3

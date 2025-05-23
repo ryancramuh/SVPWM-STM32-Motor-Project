@@ -1,0 +1,11 @@
+notes.txt
+ Created on: May 19, 2025
+     Author: whiav
+
+     TODO:
+     ( ) Test all PWM signals
+     ( ) Test ADC reading
+     ( ) Add stator angle calculation function
+     ( ) Stress test to see max output speed for both changes in d0 and update frequency
+     ( ) From stress test, determine combination function of d0 and update period from analog input
+     ( ) Overall testing and debugging

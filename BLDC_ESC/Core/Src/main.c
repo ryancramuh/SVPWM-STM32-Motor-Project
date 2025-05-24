@@ -10,13 +10,14 @@
 #define PHASE_SHIFT (TWO_PI / 3.0f)
 #define SQRT3_OVER_2 0.86602540378f
 #define ADC_EOC 0x01
+#define STARTUP 0x02
 #define MIN_DTHETA (5.0f * M_PI / 180.0f)
 #define MAX_DTHETA (20.0f * M_PI / 180.0f)
 #define MIN_T 1
 #define MAX_T 5
 
 
-unsigned short flags;
+unsigned short flags = STARTUP;
 
 ADC_HandleTypeDef hadc1;
 TIM_HandleTypeDef htim1;
@@ -82,11 +83,23 @@ int main(void)
   float dtheta = MIN_DTHETA;
   float theta = 0.0f;
   uint16_t dutyA, dutyB, dutyC;
-  uint16_t update_time = MAX_T;
+  uint16_t update_time = 1000;
 
   while (1)
   {
-	  if (sTimer[RECALCULATE_PWM_UPDATE_TIMER] == 0) {
+	  if (flags & STARTUP) {
+		  if (update_time <= 2 * MAX_T) {
+			  update_time = MAX_T;
+			  flags &= ~STARTUP;
+		  }
+
+		  if (update_time <= 100)
+			  update_time -= 5;
+		  else
+			  update_time -= 50;
+	  }
+
+	  if (sTimer[RECALCULATE_PWM_UPDATE_TIMER] == 0 && ((flags & ~STARTUP) ^ STARTUP)) {
 		  Recalculate_Update_Time(mv, &update_time, &dtheta);
 		  sTimer[RECALCULATE_PWM_UPDATE_TIMER] = RECALCULATE_PWM_UPDATE_TIME;
 	  }
@@ -163,12 +176,19 @@ static void Recalculate_Update_Time(float mv_input,
                                     uint16_t *update_time,
                                     float *dtheta)
 {
-    // mv_input clamped from 0 to 3300
-    if (mv_input < 0.0f)      mv_input = 0.0f;
-    else if (mv_input > 3300.0f) mv_input = 3300.0f;
+    // mv_input clamped from 0 to 3100
+	mv_input -= 200.0f;
+    if (mv_input < 0.0f) {
+    	mv_input = 0.0f;
+    	*update_time = 1000;
+    	*dtheta = MIN_DTHETA;
+    	flags |= STARTUP;
+    	return;
+    }
+    else if (mv_input > 3100.0f) mv_input = 3100.0f;
 
     // normalize to [0, 1]
-    float ratio = mv_input / 3300.0f;
+    float ratio = mv_input / 3100.0f;
 
     // time is proportionaly to negative mv_input
     *update_time = MAX_T - (uint16_t)(ratio * (MAX_T - MIN_T));

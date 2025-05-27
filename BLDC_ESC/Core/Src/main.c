@@ -14,6 +14,9 @@
 #define MAX_DTHETA (20.0f * M_PI / 180.0f)
 #define MIN_T 1
 #define MAX_T 5
+#define STARTUP_STEPS   6
+#define STARTUP_HOLD_MS  1000
+#define STARTUP_TURNS    15
 
 unsigned short flags = STARTUP;
 
@@ -59,11 +62,22 @@ int main(void)
   LcdPutS("Voltmeter INT");
   LcdGoto(1, 7);
   LcdPutS("mV");
-  LcdWriteCmd(0x0C); // Cursor off
+  LcdWriteCmd(0x0C);
 
   HAL_ADC_Init(&hadc1);
   HAL_ADC_Start_IT(&hadc1);
-  HAL_TIM_Base_Start_IT(&htim2); // Start timer 2 interrupt
+  HAL_TIM_Base_Start_IT(&htim2);
+
+  htim1.Instance->BDTR |= TIM_BDTR_MOE;
+
+  static const uint32_t comm[6][2] = {
+    {TIM_CHANNEL_1, TIM_CHANNEL_2},
+    {TIM_CHANNEL_1, TIM_CHANNEL_3},
+    {TIM_CHANNEL_2, TIM_CHANNEL_3},
+    {TIM_CHANNEL_2, TIM_CHANNEL_1},
+    {TIM_CHANNEL_3, TIM_CHANNEL_1},
+    {TIM_CHANNEL_3, TIM_CHANNEL_2},
+  };
 
   uint32_t adcResult;
   char buff[10];
@@ -73,10 +87,12 @@ int main(void)
   for (int i = 0; i < 3; ++i)
   {
     uint32_t ch = channels[i];
-    HAL_TIM_PWM_Start(&htim1, ch);    // high-side
-    HAL_TIMEx_PWMN_Start(&htim1, ch); // low-side complement
+    HAL_TIM_PWM_Start(&htim1, ch);
+    HAL_TIMEx_PWMN_Start(&htim1, ch);
   }
 
+  uint8_t startup_step = 0;
+  uint8_t startup_turns_done = 0;
   float dtheta = MIN_DTHETA;
   float theta = 0.0f;
   uint16_t dutyA, dutyB, dutyC;
@@ -84,20 +100,38 @@ int main(void)
 
   while (1)
   {
-    if (flags & STARTUP)
-    {
-      if (update_time <= 2 * MAX_T)
-      {
-        update_time = MAX_T;
-        flags &= ~STARTUP;
-      }
-      else if (update_time <= 100)
-        update_time -= 5;
-      else
-        update_time -= 50;
-    }
+	  if (flags & STARTUP)
+	  {
+	      uint32_t arr    = __HAL_TIM_GET_AUTORELOAD(&htim1);
+	      uint16_t halfDC = arr / 2;
 
-    if (sTimer[RECALCULATE_PWM_UPDATE_TIMER] == 0 && !(flags & STARTUP))
+	      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
+	      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
+	      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0);
+
+	      uint32_t chA = comm[startup_step][0];
+	      uint32_t chB = comm[startup_step][1];
+
+	      __HAL_TIM_SET_COMPARE(&htim1, chA, halfDC);
+	      __HAL_TIM_SET_COMPARE(&htim1, chB, halfDC);
+
+	      HAL_Delay(STARTUP_HOLD_MS);
+
+	      startup_step++;
+	      if (startup_step >= STARTUP_STEPS)
+	      {
+	          startup_step = 0;
+	          startup_turns_done++;
+	          if (startup_turns_done >= STARTUP_TURNS)
+	          {
+//	              flags &= ~STARTUP;
+	        	  startup_turns_done = 0;
+	          }
+	      }
+	      continue;
+	  }
+
+    if (sTimer[RECALCULATE_PWM_UPDATE_TIMER] == 0)
     {
       Recalculate_Update_Time(mv, &update_time, &dtheta);
       sTimer[RECALCULATE_PWM_UPDATE_TIMER] = RECALCULATE_PWM_UPDATE_TIME;
@@ -106,26 +140,21 @@ int main(void)
     if (sTimer[UPDATE_PWM_TIMER] == 0)
     {
       theta += dtheta;
-      if (theta >= TWO_PI)
-        theta = theta - TWO_PI;
-
+      if (theta >= TWO_PI) theta -= TWO_PI;
       ComputeSVPWMDuties(theta, 0.9f, &dutyA, &dutyB, &dutyC);
-
       SetDutyCycles(dutyA, dutyB, dutyC);
-
       sTimer[UPDATE_PWM_TIMER] = update_time;
     }
 
     if (flags & ADC_EOC)
     {
-      // HAL_ADC_Stop_IT(&hadc1);
-      adcResult = HAL_ADC_GetValue(&hadc1);      // get ADC value
-      mv = ((float)adcResult) * 3300.0 / 4095.0; // Convert to milli Volt
+      adcResult = HAL_ADC_GetValue(&hadc1);
+      mv = ((float)adcResult) * 3300.0f / 4095.0f;
       sprintf(buff, "%7.2f", mv);
       LcdGoto(1, 0);
       LcdPutS(buff);
       flags &= ~ADC_EOC;
-      HAL_ADC_Start_IT(&hadc1); // Restart ADC
+      HAL_ADC_Start_IT(&hadc1);
     }
   }
 }

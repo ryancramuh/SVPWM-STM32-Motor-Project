@@ -9,16 +9,14 @@
 #define PHASE_SHIFT (TWO_PI / 3.0f)
 #define SQRT3_OVER_2 0.86602540378f
 #define ADC_EOC 0x01
-#define STARTUP 0x02
-#define MIN_DTHETA (5.0f * M_PI / 180.0f)
-#define MAX_DTHETA (20.0f * M_PI / 180.0f)
+#define MIN_DTHETA 5
+#define MAX_DTHETA 20
 #define MIN_T 1
 #define MAX_T 5
-#define STARTUP_STEPS   6
-#define STARTUP_HOLD_MS  1000
-#define STARTUP_TURNS    15
 
-unsigned short flags = STARTUP;
+unsigned short flags = 0;
+float cos_table[360];
+float sin_table[360];
 
 ADC_HandleTypeDef hadc1;
 TIM_HandleTypeDef htim1;
@@ -30,9 +28,9 @@ static void MX_ADC1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 
-static void ComputeSVPWMDuties(float theta, float magnitude, uint16_t *pdutyA, uint16_t *pdutyB, uint16_t *pdutyC);
+static void ComputeSVPWMDuties(int theta, float magnitude, uint16_t *pdutyA, uint16_t *pdutyB, uint16_t *pdutyC);
 static void SetDutyCycles(uint16_t dutyA, uint16_t dutyB, uint16_t dutyC);
-static void Recalculate_Update_Time(float mv_input, uint16_t *update_time, float *dtheta);
+static void Recalculate_Update_Time(float mv_input, uint16_t *update_time, int *dtheta);
 
 // ADC conversion completion interrupt
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc1A)
@@ -70,18 +68,14 @@ int main(void)
 
   htim1.Instance->BDTR |= TIM_BDTR_MOE;
 
-  static const uint32_t comm[6][2] = {
-    {TIM_CHANNEL_1, TIM_CHANNEL_2},
-    {TIM_CHANNEL_1, TIM_CHANNEL_3},
-    {TIM_CHANNEL_2, TIM_CHANNEL_3},
-    {TIM_CHANNEL_2, TIM_CHANNEL_1},
-    {TIM_CHANNEL_3, TIM_CHANNEL_1},
-    {TIM_CHANNEL_3, TIM_CHANNEL_2},
-  };
-
   uint32_t adcResult;
   char buff[10];
   float mv;
+
+  for(int i=0;i<360;i++){
+    cos_table[i] = cosf((float)i * M_PI / 180.0f);
+    sin_table[i] = sinf((float)i * M_PI / 180.0f);
+  }
 
   const uint32_t channels[3] = {TIM_CHANNEL_1, TIM_CHANNEL_2, TIM_CHANNEL_3};
   for (int i = 0; i < 3; ++i)
@@ -91,46 +85,13 @@ int main(void)
     HAL_TIMEx_PWMN_Start(&htim1, ch);
   }
 
-  uint8_t startup_step = 0;
-  uint8_t startup_turns_done = 0;
-  float dtheta = MIN_DTHETA;
-  float theta = 0.0f;
+  int dtheta = MIN_DTHETA;
+  int theta = 0.0f;
   uint16_t dutyA, dutyB, dutyC;
   uint16_t update_time = 1000;
 
   while (1)
   {
-	  if (flags & STARTUP)
-	  {
-	      uint32_t arr    = __HAL_TIM_GET_AUTORELOAD(&htim1);
-	      uint16_t halfDC = arr / 2;
-
-	      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0);
-	      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0);
-	      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0);
-
-	      uint32_t chA = comm[startup_step][0];
-	      uint32_t chB = comm[startup_step][1];
-
-	      __HAL_TIM_SET_COMPARE(&htim1, chA, halfDC);
-	      __HAL_TIM_SET_COMPARE(&htim1, chB, halfDC);
-
-	      HAL_Delay(STARTUP_HOLD_MS);
-
-	      startup_step++;
-	      if (startup_step >= STARTUP_STEPS)
-	      {
-	          startup_step = 0;
-	          startup_turns_done++;
-	          if (startup_turns_done >= STARTUP_TURNS)
-	          {
-//	              flags &= ~STARTUP;
-	        	  startup_turns_done = 0;
-	          }
-	      }
-	      continue;
-	  }
-
     if (sTimer[RECALCULATE_PWM_UPDATE_TIMER] == 0)
     {
       Recalculate_Update_Time(mv, &update_time, &dtheta);
@@ -140,7 +101,7 @@ int main(void)
     if (sTimer[UPDATE_PWM_TIMER] == 0)
     {
       theta += dtheta;
-      if (theta >= TWO_PI) theta -= TWO_PI;
+      theta %= 360;
       ComputeSVPWMDuties(theta, 0.9f, &dutyA, &dutyB, &dutyC);
       SetDutyCycles(dutyA, dutyB, dutyC);
       sTimer[UPDATE_PWM_TIMER] = update_time;
@@ -150,20 +111,25 @@ int main(void)
     {
       adcResult = HAL_ADC_GetValue(&hadc1);
       mv = ((float)adcResult) * 3300.0f / 4095.0f;
-      sprintf(buff, "%7.2f", mv);
-      LcdGoto(1, 0);
-      LcdPutS(buff);
+
+      if (sTimer[UPDATE_LCD_TIMER] == 0) {
+    	  sprintf(buff, "%7.2f", mv);
+    	  LcdGoto(1, 0);
+    	  LcdPutS(buff);
+    	  sTimer[UPDATE_LCD_TIMER] = UPDATE_LCD_TIME;
+      }
+
       flags &= ~ADC_EOC;
       HAL_ADC_Start_IT(&hadc1);
     }
   }
 }
 
-static void ComputeSVPWMDuties(float theta, float magnitude, uint16_t *pdutyA, uint16_t *pdutyB, uint16_t *pdutyC)
+static void ComputeSVPWMDuties(int theta, float magnitude, uint16_t *pdutyA, uint16_t *pdutyB, uint16_t *pdutyC)
 {
   // Inverse Park to generate alpha and beta components from angle with vd=m, vq=0
-  float v_alpha = magnitude * cosf(theta);
-  float v_beta = magnitude * sinf(theta);
+  float v_alpha = magnitude * cos_table[theta];
+  float v_beta = magnitude * sin_table[theta];
 
   // Inverse Clarke to get raw phases
   float va = v_alpha;
@@ -203,49 +169,44 @@ static void SetDutyCycles(uint16_t dutyA_pct, uint16_t dutyB_pct, uint16_t dutyC
 
 static void Recalculate_Update_Time(float mv_input,
                                     uint16_t *update_time,
-                                    float *dtheta)
+                                    int *dtheta)
 {
-  // mv_input clamped from 0 to 3100
-  mv_input -= 200.0f;
+  // mv_input clamped from 0 to 3300
   if (mv_input < 0.0f)
   {
     mv_input = 0.0f;
-    *update_time = 1000;
-    *dtheta = MIN_DTHETA;
-    flags |= STARTUP;
-    return;
   }
-  else if (mv_input > 3100.0f)
-    mv_input = 3100.0f;
+  else if (mv_input > 3300.0f)
+    mv_input = 3300.0f;
 
   // normalize to [0, 1]
-  float ratio = mv_input / 3100.0f;
+  float ratio = mv_input / 3300.0f;
 
   // time is proportionaly to negative mv_input
   *update_time = MAX_T - (uint16_t)(ratio * (MAX_T - MIN_T));
   // dtheta is proportional to mv_input
-  *dtheta = MIN_DTHETA + ratio * (MAX_DTHETA - MIN_DTHETA);
+  *dtheta = MIN_DTHETA + (int)(ratio * (MAX_DTHETA - MIN_DTHETA));
 }
 
 /**
- * @brief System Clock Configuration
- * @retval None
- */
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
   /** Configure the main internal regulator output voltage
-   */
+  */
   if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Initializes the RCC Oscillators according to the specified parameters
-   * in the RCC_OscInitTypeDef structure.
-   */
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -262,8 +223,9 @@ void SystemClock_Config(void)
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-   */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
@@ -276,10 +238,10 @@ void SystemClock_Config(void)
 }
 
 /**
- * @brief ADC1 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_ADC1_Init(void)
 {
 
@@ -295,7 +257,7 @@ static void MX_ADC1_Init(void)
   /* USER CODE END ADC1_Init 1 */
 
   /** Common config
-   */
+  */
   hadc1.Instance = ADC1;
   hadc1.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
@@ -303,13 +265,13 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   hadc1.Init.LowPowerAutoWait = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.ContinuousConvMode = ENABLE;
   hadc1.Init.NbrOfConversion = 1;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.DMAContinuousRequests = DISABLE;
-  hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  hadc1.Init.Overrun = ADC_OVR_DATA_OVERWRITTEN;
   hadc1.Init.OversamplingMode = DISABLE;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
@@ -317,7 +279,7 @@ static void MX_ADC1_Init(void)
   }
 
   /** Configure the ADC multi-mode
-   */
+  */
   multimode.Mode = ADC_MODE_INDEPENDENT;
   if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
   {
@@ -325,7 +287,7 @@ static void MX_ADC1_Init(void)
   }
 
   /** Configure Regular Channel
-   */
+  */
   sConfig.Channel = ADC_CHANNEL_10;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
@@ -339,13 +301,14 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
- * @brief TIM1 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM1_Init(void)
 {
 
@@ -426,13 +389,14 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 2 */
   HAL_TIM_MspPostInit(&htim1);
+
 }
 
 /**
- * @brief TIM2 Initialization Function
- * @param None
- * @retval None
- */
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM2_Init(void)
 {
 
@@ -470,13 +434,14 @@ static void MX_TIM2_Init(void)
   /* USER CODE BEGIN TIM2_Init 2 */
 
   /* USER CODE END TIM2_Init 2 */
+
 }
 
 /**
- * @brief GPIO Initialization Function
- * @param None
- * @retval None
- */
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -489,20 +454,20 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10 | GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_10|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11 | GPIO_PIN_12, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11|GPIO_PIN_12, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : PB10 PB3 PB4 PB5 */
-  GPIO_InitStruct.Pin = GPIO_PIN_10 | GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5;
+  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PA11 PA12 */
-  GPIO_InitStruct.Pin = GPIO_PIN_11 | GPIO_PIN_12;
+  GPIO_InitStruct.Pin = GPIO_PIN_11|GPIO_PIN_12;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -518,9 +483,9 @@ static void MX_GPIO_Init(void)
 /* USER CODE END 4 */
 
 /**
- * @brief  This function is executed in case of error occurrence.
- * @retval None
- */
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
@@ -532,14 +497,14 @@ void Error_Handler(void)
   /* USER CODE END Error_Handler_Debug */
 }
 
-#ifdef USE_FULL_ASSERT
+#ifdef  USE_FULL_ASSERT
 /**
- * @brief  Reports the name of the source file and the source line number
- *         where the assert_param error has occurred.
- * @param  file: pointer to the source file name
- * @param  line: assert_param error line source number
- * @retval None
- */
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */

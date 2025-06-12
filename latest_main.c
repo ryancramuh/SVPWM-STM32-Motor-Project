@@ -56,64 +56,72 @@ int main(void) {
     MX_TIM2_Init();
     HAL_TIM_MspPostInit(&htim1);
 
-    // Init peripherals
+        // Init peripherals
+        // start the adc in interrupt mode so we get samples automatically
     HAL_ADC_Start_IT(&hadc1);
+    // kick off tim2 for our 1 ms tick
     HAL_TIM_Base_Start_IT(&htim2);
+    // enable pwm outputs on tim1 (main motor drive)
     htim1.Instance->BDTR |= TIM_BDTR_MOE;
-
+    
+    // build lookup tables for sin and cos so we don't compute them in the loop
     for (int i = 0; i < 360; ++i) {
         float rad = (float)i * M_PI / 180.0f;
         cos_table[i] = cosf(rad);
         sin_table[i] = sinf(rad);
     }
-
+    
+    // start pwm channels and their complementary outputs
     const uint32_t channels[] = {TIM_CHANNEL_1, TIM_CHANNEL_2, TIM_CHANNEL_3};
     for (int i = 0; i < 3; ++i) {
         HAL_TIM_PWM_Start(&htim1, channels[i]);
         HAL_TIMEx_PWMN_Start(&htim1, channels[i]);
     }
-
-    // LCD startup
-    LcdInit(); LcdClear();
+    
+    // initialize the lcd and display a header
+    LcdInit();
+    LcdClear();
     LcdPutS("BLDC Control");
-    LcdGoto(1, 7); LcdPutS("mV");
+    LcdGoto(1, 7);
+    LcdPutS("mV");
     LcdWriteCmd(0x0C);
-
-    AlignRotor();  // Pre-alignment before rotation
-
+    
+    // do a quick rotor alignment so we start in a known position
+    AlignRotor();
+    
+    // initial control variables
     int theta = 0;
     float magnitude = MIN_MAG;
     int dtheta = MIN_DTHETA;
     uint16_t dutyA, dutyB, dutyC;
-
+    
     while (1) {
-        // Handle ADC update
+        // if we got a new adc sample, read it and apply a simple low-pass filter
         if (flags & ADC_EOC) {
             uint32_t raw = HAL_ADC_GetValue(&hadc1);
-            mv = (raw * 3300.0f) / 4095.0f;
-            mv_filtered = 0.9f * mv_filtered + 0.1f * mv; // low-pass filter
+            mv = (raw * 3300.0f) / 4095.0f;                // convert adc to mV
+            mv_filtered = 0.9f * mv_filtered + 0.1f * mv;  // basic 90/10 filter
             flags &= ~ADC_EOC;
-            HAL_ADC_Start_IT(&hadc1);
+            HAL_ADC_Start_IT(&hadc1);                     // restart adc
         }
-
-        // Update control loop
+    
+        // every 1 ms, update our pwm duties based on the filtered voltage
         if (sTimer[UPDATE_PWM_TIMER] == 0) {
-            // Map ADC to dynamic params
-            float ratio = mv_filtered / 3300.0f;
-            magnitude = MIN_MAG + ratio * (MAX_MAG - MIN_MAG);
+            float ratio = mv_filtered / 3300.0f;                        // normalize
+            magnitude = MIN_MAG + ratio * (MAX_MAG - MIN_MAG);         // map to mag
             if (magnitude > MAX_MAG) magnitude = MAX_MAG;
-
-            dtheta = MIN_DTHETA + (int)(ratio * (MAX_DTHETA - MIN_DTHETA));
+    
+            dtheta = MIN_DTHETA + (int)(ratio * (MAX_DTHETA - MIN_DTHETA)); // map to speed step
             if (dtheta > MAX_DTHETA) dtheta = MAX_DTHETA;
-
-            theta = (theta + dtheta) % 360;
+    
+            theta = (theta + dtheta) % 360;                            // wrap around
             ComputeSVPWMDuties(theta, magnitude, &dutyA, &dutyB, &dutyC);
             SetDutyCycles(dutyA, dutyB, dutyC);
-
-            sTimer[UPDATE_PWM_TIMER] = 1; // 1 ms update cycle
+    
+            sTimer[UPDATE_PWM_TIMER] = 1; // reload for next ms
         }
-
-        // Optional: update LCD
+    
+        // every 200 ms, refresh the lcd with the latest filtered mV
         if (sTimer[UPDATE_LCD_TIMER] == 0) {
             char buff[10];
             sprintf(buff, "%7.2f", mv_filtered);
